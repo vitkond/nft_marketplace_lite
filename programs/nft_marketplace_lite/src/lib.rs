@@ -14,6 +14,8 @@ pub enum ErrorCode {
     InvalidBayerPrice,
     #[msg("Account is not an owner")]
     InvalidSellerAccount,
+    #[msg("Invalid Fee")]
+    InvalidFeeBps
 }
 
 #[program]
@@ -29,7 +31,7 @@ pub mod nft_marketplace_lite {
         listing.bump = ctx.bumps.listing;
 
         // Transfer the NFT from the seller to the vault
-        let cpi_accounts = anchor_spl::token::Transfer {
+        let cpi_accounts = token::Transfer {
             from: ctx.accounts.seller_nft_account.to_account_info(),
             to: ctx.accounts.vault.to_account_info(),
             authority: ctx.accounts.seller.to_account_info(),
@@ -45,14 +47,26 @@ pub mod nft_marketplace_lite {
         let listing = &ctx.accounts.listing;
         require!(price == listing.price, ErrorCode::InvalidBayerPrice);
 
+        let fee = listing.price * ctx.accounts.config.fee_bps as u64 / 10_000;
+        let seller_amount = price - fee;
+
         // Transfer the payment from the buyer to the seller
         let cpi_accounts = system_program::Transfer {
             from: ctx.accounts.buyer.to_account_info(),
             to: ctx.accounts.seller.to_account_info(),
         };
-        let transfer_ctx =
+        let transfer_seller_ctx =
             CpiContext::new(ctx.accounts.system_program.to_account_info(), cpi_accounts);
-        system_program::transfer(transfer_ctx, price)?;
+        system_program::transfer(transfer_seller_ctx, seller_amount)?;
+
+        // transfer fee ammount
+        let cpi_accounts = system_program::Transfer {
+            from: ctx.accounts.buyer.to_account_info(),
+            to: ctx.accounts.fee_recipient.to_account_info(),
+        };
+        let transfer_fee_ctx =
+            CpiContext::new(ctx.accounts.system_program.to_account_info(), cpi_accounts);
+        system_program::transfer(transfer_fee_ctx, fee)?;
 
         // Transfer the NFT from the vault to the buyer
         let cpi_accounts = token::Transfer {
@@ -124,6 +138,16 @@ pub mod nft_marketplace_lite {
 
         Ok(())
     }
+
+    pub fn initialize_marketplace(ctx: Context<InitMarketPlaceConfig>, fee_bps: u16) -> Result<()> {
+        require!(fee_bps <= 1000, ErrorCode::InvalidFeeBps);
+        let config = &mut ctx.accounts.config;
+        config.fee_recipient = ctx.accounts.fee_recipient.key();
+        config.authority = ctx.accounts.authority.key();
+        config.bump = ctx.bumps.config;
+        config.fee_bps = fee_bps;
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -177,9 +201,19 @@ pub struct BuyNft<'info> {
         associated_token::authority = listing,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, address = listing.seller)]
     /// CHECK: checked by address = listing.seller
+    #[account(mut, address = listing.seller)]
     pub seller: UncheckedAccount<'info>,
+    #[account(
+        seeds = [b"marketplace"],
+        bump = config.bump
+    )]
+    pub config: Account<'info, MarketplaceConfig>,
+    #[account(
+        mut,
+        address = config.fee_recipient
+    )]
+    pub fee_recipient: SystemAccount<'info>,
     #[account(mut)]
     pub buyer: Signer<'info>,
     #[account(
@@ -223,11 +257,36 @@ pub struct CancelListing<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct InitMarketPlaceConfig<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + MarketplaceConfig::INIT_SPACE,
+        seeds = [b"marketplace"],
+        bump
+    )]
+    pub config: Account<'info, MarketplaceConfig>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub fee_recipient: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct Listing {
     pub seller: Pubkey,
     pub mint: Pubkey,
     pub price: u64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct MarketplaceConfig {
+    pub authority: Pubkey,
+    pub fee_recipient: Pubkey,
+    pub fee_bps: u16,
     pub bump: u8,
 }

@@ -112,6 +112,14 @@ describe("nft_marketplace_lite", () => {
     });
 
     it("buy nft!", async () => {
+        const authority = anchor.web3.Keypair.generate();
+        await provider.connection.confirmTransaction(
+            await provider.connection.requestAirdrop(
+                authority.publicKey,
+                2 * anchor.web3.LAMPORTS_PER_SOL
+            )
+        );
+
         const seller = anchor.web3.Keypair.generate();
         await provider.connection.confirmTransaction(
             await provider.connection.requestAirdrop(
@@ -178,12 +186,37 @@ describe("nft_marketplace_lite", () => {
             .signers([seller])
             .rpc();
 
+
+        const [configPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("marketplace")],
+            program.programId
+        );
+        await program.methods
+            .initializeMarketplace(50)
+            .accountsPartial({
+                authority: authority.publicKey,
+                config: configPda,
+                feeRecipient: authority.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId
+            })
+            .signers([authority])
+            .rpc();
+
+
+        const config =  await program.account.marketplaceConfig.fetch(configPda);
+        expect(config.feeBps).to.eq(50);
+        expect(config.feeRecipient.toBase58()).to.eq(authority.publicKey.toBase58());
+        expect(config.authority.toBase58()).to.eq(authority.publicKey.toBase58());
+
+        const authorityAmountBefore = await provider.connection.getBalance(authority.publicKey);
         await program.methods
             .buyNft(price)
             .accountsPartial({
                 seller: seller.publicKey,
                 mint,
                 listing: listingPda,
+                config: configPda,
+                feeRecipient: authority.publicKey,
                 vault,
                 tokenProgram: TOKEN_PROGRAM_ID,
                 buyer: buyer.publicKey,
@@ -197,5 +230,13 @@ describe("nft_marketplace_lite", () => {
         expect(listingAccount).to.eq(null);
         const buyerAfter = await getAccount(provider.connection, bayerAta.address);
         expect(buyerAfter.amount.toString()).to.eq("1");
+        try {
+            await getAccount(provider.connection, vault);
+            expect.fail("Vault should be closed after buyNft");
+        } catch (e) {
+            expect(e).to.exist;
+        }
+        const authorityAmountAfter = await provider.connection.getBalance(authority.publicKey);
+        expect(authorityAmountAfter).to.be.gt(authorityAmountBefore);
     });
 });
